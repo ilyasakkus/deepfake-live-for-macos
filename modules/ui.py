@@ -205,7 +205,10 @@ Features:
         file_path = filedialog.askopenfilename(
             title="Select Source Face Image",
             filetypes=[
-                ("Image files", "*.jpg *.jpeg *.png *.bmp"),
+                ("Image files", "*.jpg *.jpeg *.png *.bmp *.webp *.heic *.heif"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("HEIC (iPhone)", "*.heic *.heif"),
                 ("All files", "*.*")
             ]
         )
@@ -224,7 +227,7 @@ Features:
                     messagebox.showinfo("Success", "Source face loaded successfully!")
                 else:
                     self.source_image_path = None
-                    messagebox.showerror("Error", "Failed to detect face in image")
+                    messagebox.showerror("Error", self.camera_processor.get_source_error())
                     
             except Exception as e:
                 self.source_image_path = None
@@ -235,6 +238,13 @@ Features:
         if not self.is_live:
             if not self.source_image_path:
                 messagebox.showwarning("Warning", "Please select a source face image first")
+                return
+
+            if not self.camera_processor.is_model_loaded():
+                messagebox.showerror(
+                    "Missing Model",
+                    self.camera_processor.get_model_error()
+                )
                 return
             
             # Apply performance mode before starting

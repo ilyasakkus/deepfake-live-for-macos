@@ -39,9 +39,15 @@ source venv/bin/activate
 echo "Upgrading pip..."
 pip install --upgrade pip
 
-# Install requirements
+# Install requirements (dlib is optional — only needed for lip sync)
 echo "Installing requirements..."
-pip install -r requirements.txt
+pip install -r requirements.txt || {
+    echo "Full install failed (often dlib). Installing core dependencies..."
+    grep -v '^dlib' requirements.txt | pip install -r /dev/stdin
+    echo ""
+    echo "Note: dlib failed to install. Lip sync will be unavailable."
+    echo "To enable lip sync later: brew install cmake && pip install dlib==19.24.1"
+}
 
 # Create models directory
 mkdir -p models

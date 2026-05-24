@@ -85,9 +85,14 @@ def download_models() -> bool:
             try:
                 # Use gdown to download from Google Drive
                 gdown.download(url, str(swapper_model_path), quiet=False)
-                print("Face swapper model downloaded successfully")
+                if _is_valid_model_file(swapper_model_path):
+                    print("Face swapper model downloaded successfully")
+                else:
+                    raise RuntimeError("Downloaded model file is missing or too small")
             except Exception as e:
                 print(f"Error downloading face swapper model: {e}")
+                if swapper_model_path.exists():
+                    swapper_model_path.unlink()
                 
                 # Alternative download method
                 print("Trying alternative download method...")
@@ -95,8 +100,13 @@ def download_models() -> bool:
                 
                 try:
                     urllib.request.urlretrieve(alternative_url, str(swapper_model_path))
-                    print("Face swapper model downloaded successfully (alternative method)")
+                    if _is_valid_model_file(swapper_model_path):
+                        print("Face swapper model downloaded successfully (alternative method)")
+                    else:
+                        raise RuntimeError("Downloaded model file is missing or too small")
                 except Exception as e2:
+                    if swapper_model_path.exists():
+                        swapper_model_path.unlink()
                     print(f"Alternative download also failed: {e2}")
                     print("\nPlease download the model manually:")
                     print(f"1. Download inswapper_128.onnx from: {alternative_url}")
@@ -114,6 +124,10 @@ def download_models() -> bool:
     except Exception as e:
         print(f"Error in model download: {e}")
         return False
+
+def _is_valid_model_file(path: Path) -> bool:
+    """Return whether a downloaded ONNX model looks complete enough to use."""
+    return path.exists() and path.stat().st_size > 100 * 1024 * 1024
 
 def get_available_cameras() -> list:
     """
@@ -159,4 +173,4 @@ def optimize_for_macos():
 try:
     import cv2
 except ImportError:
-    print("Error: OpenCV not found. Please install: pip install opencv-python") 
+    print("Error: OpenCV not found. Please install: pip install opencv-python")

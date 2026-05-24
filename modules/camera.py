@@ -84,9 +84,32 @@ class CameraProcessor:
         Returns:
             True if successful
         """
+        if not self.face_swapper:
+            self._source_error = "Face swap engine is not initialized. Restart the app."
+            return False
+        self._source_error = None
+        return self.face_swapper.set_source_face(image_path)
+
+    def get_source_error(self) -> str:
+        """Return the latest source image error from the face swapper."""
+        if getattr(self, "_source_error", None):
+            return self._source_error
+        if self.face_swapper and getattr(self.face_swapper, "last_error", None):
+            return self.face_swapper.last_error
+        return (
+            "No face detected. Use a clear front-facing portrait (JPG/PNG). "
+            "If this is an iPhone HEIC photo, convert it to JPG or PNG first."
+        )
+
+    def is_model_loaded(self) -> bool:
+        """Return whether the face swap model is loaded."""
+        return bool(self.face_swapper and self.face_swapper.is_model_loaded())
+
+    def get_model_error(self) -> str:
+        """Return the latest model loading error."""
         if self.face_swapper:
-            return self.face_swapper.set_source_face(image_path)
-        return False
+            return self.face_swapper.get_model_error()
+        return "Face swap engine is not initialized. Restart the app."
     
     def set_frame_callback(self, callback: Callable):
         """Set callback for processed frames."""
