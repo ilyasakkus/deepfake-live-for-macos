@@ -14,6 +14,7 @@ Developed by Ilyas AKKUS
 - Robust source image loading with EXIF orientation fixes
 - JPG, JPEG, PNG, BMP, WebP, HEIC, and HEIF source image selection
 - Clear startup warnings when the face swap model is missing
+<img width="1189" height="705" alt="Screenshot 2026-05-24 at 22 26 54" src="https://github.com/user-attachments/assets/f1d18484-544a-47cc-a9e8-9ada0ca08fde" />
 
 ## Requirements
 
