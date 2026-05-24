@@ -19,6 +19,12 @@ except ImportError:
 
 class CameraProcessor:
     """Handles camera input and face swapping in real-time."""
+
+    PERFORMANCE_MODES = {
+        "fast": {"skip_frames": 3, "resolution_scale": 0.4},
+        "balanced": {"skip_frames": 2, "resolution_scale": 0.5},
+        "quality": {"skip_frames": 1, "resolution_scale": 0.8},
+    }
     
     def __init__(self, camera_id: int = 0, face_swapper=None):
         """
@@ -55,6 +61,7 @@ class CameraProcessor:
         self.skip_frames = 2  # Process every Nth frame
         self.frame_counter = 0
         self.resolution_scale = 0.5  # Scale down for processing
+        self.performance_mode = "balanced"
         
         # Lip sync
         if LIP_SYNC_AVAILABLE:
@@ -94,6 +101,8 @@ class CameraProcessor:
         self.cap = cv2.VideoCapture(self.camera_id)
         if not self.cap.isOpened():
             print(f"Error: Cannot open camera {self.camera_id}")
+            self.cap.release()
+            self.cap = None
             return False
         
         # Set camera properties for better performance
@@ -107,8 +116,16 @@ class CameraProcessor:
         self.is_running = True
         
         # Start threads
-        self.capture_thread = threading.Thread(target=self._capture_loop)
-        self.process_thread = threading.Thread(target=self._process_loop)
+        self.capture_thread = threading.Thread(
+            target=self._capture_loop,
+            name="camera-capture",
+            daemon=True
+        )
+        self.process_thread = threading.Thread(
+            target=self._process_loop,
+            name="camera-process",
+            daemon=True
+        )
         
         self.capture_thread.start()
         self.process_thread.start()
@@ -120,9 +137,9 @@ class CameraProcessor:
         self.is_running = False
         
         if self.capture_thread:
-            self.capture_thread.join()
+            self.capture_thread.join(timeout=1.0)
         if self.process_thread:
-            self.process_thread.join()
+            self.process_thread.join(timeout=1.0)
         
         if self.cap:
             self.cap.release()
@@ -130,9 +147,15 @@ class CameraProcessor:
         
         # Clear queues
         while not self.input_queue.empty():
-            self.input_queue.get()
+            try:
+                self.input_queue.get_nowait()
+            except queue.Empty:
+                break
         while not self.output_queue.empty():
-            self.output_queue.get()
+            try:
+                self.output_queue.get_nowait()
+            except queue.Empty:
+                break
     
     def _capture_loop(self):
         """Capture frames from camera."""
@@ -140,17 +163,7 @@ class CameraProcessor:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if ret:
-                    # Drop old frames
-                    if self.input_queue.full():
-                        try:
-                            self.input_queue.get_nowait()
-                        except:
-                            pass
-                    
-                    try:
-                        self.input_queue.put_nowait(frame)
-                    except:
-                        pass
+                    self._put_latest(self.input_queue, frame)
             else:
                 time.sleep(0.01)
     
@@ -161,18 +174,17 @@ class CameraProcessor:
         while self.is_running:
             try:
                 frame = self.input_queue.get(timeout=0.1)
-                self.original_frame = frame.copy()  # Store for lip sync
-                
                 # Frame skipping for performance
                 self.frame_counter += 1
                 
                 if self.frame_counter % self.skip_frames == 0:
                     # Resize frame for processing
                     height, width = frame.shape[:2]
+                    process_width = max(1, int(width * self.resolution_scale))
+                    process_height = max(1, int(height * self.resolution_scale))
                     small_frame = cv2.resize(
                         frame, 
-                        (int(width * self.resolution_scale), 
-                         int(height * self.resolution_scale))
+                        (process_width, process_height)
                     )
                     
                     # Process frame
@@ -182,7 +194,8 @@ class CameraProcessor:
                         processed_frame = cv2.resize(processed_small, (width, height))
                         
                         # Apply lip sync if enabled
-                        if self.enable_lip_sync and self.lip_sync and self.lip_sync.enabled:
+                        if self._should_apply_lip_sync():
+                            self.original_frame = frame.copy()
                             processed_frame = self.lip_sync.process_frame(
                                 self.original_frame, 
                                 processed_frame
@@ -203,44 +216,15 @@ class CameraProcessor:
                     self.frame_count = 0
                     self.start_time = time.time()
                 
-                # Add FPS overlay
-                cv2.putText(
-                    processed_frame,
-                    f"FPS: {self.fps:.1f}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 255, 0),
-                    2
-                )
-                
-                # Add performance mode indicator
-                mode_text = f"Mode: {'Fast' if self.skip_frames > 2 else 'Balanced'}"
-                cv2.putText(
-                    processed_frame,
-                    mode_text,
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2
-                )
+                output_frame = processed_frame.copy()
+                self._draw_overlay(output_frame)
                 
                 # Send to callback
                 if self.frame_callback:
-                    self.frame_callback(processed_frame)
+                    self.frame_callback(output_frame)
                 
                 # Store in output queue
-                if self.output_queue.full():
-                    try:
-                        self.output_queue.get_nowait()
-                    except:
-                        pass
-                
-                try:
-                    self.output_queue.put_nowait(processed_frame)
-                except:
-                    pass
+                self._put_latest(self.output_queue, output_frame)
                     
             except queue.Empty:
                 continue
@@ -265,19 +249,61 @@ class CameraProcessor:
         Args:
             mode: 'fast', 'balanced', or 'quality'
         """
-        if mode == 'fast':
-            self.skip_frames = 3
-            self.resolution_scale = 0.4
-        elif mode == 'balanced':
-            self.skip_frames = 2
-            self.resolution_scale = 0.5
-        else:  # quality
-            self.skip_frames = 1
-            self.resolution_scale = 0.8
+        if mode not in self.PERFORMANCE_MODES:
+            raise ValueError(f"Unknown performance mode: {mode}")
+
+        settings = self.PERFORMANCE_MODES[mode]
+        self.performance_mode = mode
+        self.skip_frames = settings["skip_frames"]
+        self.resolution_scale = settings["resolution_scale"]
     
     def toggle_lip_sync(self):
         """Toggle lip sync on/off."""
-        if LIP_SYNC_AVAILABLE and self.lip_sync:
+        if self.is_lip_sync_available():
             self.enable_lip_sync = not self.enable_lip_sync
             return self.enable_lip_sync
-        return False 
+        self.enable_lip_sync = False
+        return False
+
+    def is_lip_sync_available(self) -> bool:
+        """Return whether lip sync can run with the current model setup."""
+        return bool(LIP_SYNC_AVAILABLE and self.lip_sync and self.lip_sync.enabled)
+
+    def _should_apply_lip_sync(self) -> bool:
+        """Return whether lip sync should run for this frame."""
+        return self.enable_lip_sync and self.is_lip_sync_available()
+
+    def _put_latest(self, target_queue: queue.Queue, frame: np.ndarray):
+        """Store a frame, dropping stale queued frames to keep latency low."""
+        if target_queue.full():
+            try:
+                target_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        try:
+            target_queue.put_nowait(frame)
+        except queue.Full:
+            pass
+
+    def _draw_overlay(self, frame: np.ndarray):
+        """Draw lightweight runtime telemetry on the frame."""
+        cv2.putText(
+            frame,
+            f"FPS: {self.fps:.1f}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Mode: {self.performance_mode.title()}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )

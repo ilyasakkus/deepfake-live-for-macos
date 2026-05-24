@@ -2,14 +2,12 @@
 GUI module for Deepfake Live Camera application.
 """
 
-import os
+import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import cv2
 from PIL import Image, ImageTk
-import numpy as np
-import threading
 
 # Set appearance
 ctk.set_appearance_mode("dark")
@@ -31,13 +29,17 @@ class DeepfakeApp:
         # Variables
         self.source_image_path = None
         self.is_live = False
+        self.is_closing = False
         self.preview_label = None
+        self.preview_queue = queue.Queue(maxsize=1)
+        self.fps_update_job = None
         
         # Setup UI
         self._setup_ui()
         
         # Set frame callback
-        self.camera_processor.set_frame_callback(self._update_preview)
+        self.camera_processor.set_frame_callback(self._queue_preview_frame)
+        self.root.after(15, self._drain_preview_queue)
         
     def _setup_ui(self):
         """Setup the user interface."""
@@ -127,7 +129,7 @@ class DeepfakeApp:
         # Lip sync toggle
         self.lip_sync_btn = ctk.CTkButton(
             control_frame,
-            text="Lip Sync: ON",
+            text="Lip Sync: ON" if self.camera_processor.is_lip_sync_available() else "Lip Sync: N/A",
             command=self._toggle_lip_sync,
             width=200,
             height=30
@@ -209,23 +211,23 @@ Features:
         )
         
         if file_path:
-            self.source_image_path = file_path
-            
-            # Update preview
             try:
                 # Load and resize image for preview
                 image = Image.open(file_path)
                 image.thumbnail((200, 200), Image.Resampling.LANCZOS)
                 photo = ctk.CTkImage(light_image=image, dark_image=image, size=(200, 200))
-                self.source_preview.configure(image=photo, text="")
                 
                 # Set source face
                 if self.camera_processor.set_source_image(file_path):
+                    self.source_image_path = file_path
+                    self.source_preview.configure(image=photo, text="")
                     messagebox.showinfo("Success", "Source face loaded successfully!")
                 else:
+                    self.source_image_path = None
                     messagebox.showerror("Error", "Failed to detect face in image")
                     
             except Exception as e:
+                self.source_image_path = None
                 messagebox.showerror("Error", f"Failed to load image: {str(e)}")
     
     def _toggle_live(self):
@@ -242,16 +244,14 @@ Features:
             if self.camera_processor.start():
                 self.is_live = True
                 self.live_btn.configure(text="Stop Live")
-                
-                # Start FPS update thread
-                self.fps_thread = threading.Thread(target=self._update_fps, daemon=True)
-                self.fps_thread.start()
+                self._schedule_fps_update()
             else:
                 messagebox.showerror("Error", "Failed to start camera")
         else:
             # Stop camera
             self.camera_processor.stop()
             self.is_live = False
+            self._cancel_fps_update()
             self.live_btn.configure(text="Start Live")
             self.preview_label.configure(
                 image=None, 
@@ -267,8 +267,45 @@ Features:
     def _toggle_lip_sync(self):
         """Toggle lip sync feature."""
         enabled = self.camera_processor.toggle_lip_sync()
-        self.lip_sync_btn.configure(text=f"Lip Sync: {'ON' if enabled else 'OFF'}")
+        if self.camera_processor.is_lip_sync_available():
+            self.lip_sync_btn.configure(text=f"Lip Sync: {'ON' if enabled else 'OFF'}")
+        else:
+            self.lip_sync_btn.configure(text="Lip Sync: N/A")
     
+    def _queue_preview_frame(self, frame):
+        """Receive a processed frame from the camera thread."""
+        if self.preview_queue.full():
+            try:
+                self.preview_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        try:
+            self.preview_queue.put_nowait(frame)
+        except queue.Full:
+            pass
+
+    def _drain_preview_queue(self):
+        """Render the latest queued preview frame on Tk's main loop."""
+        if self.is_closing:
+            return
+
+        if not self.is_live:
+            self.root.after(15, self._drain_preview_queue)
+            return
+
+        frame = None
+        while True:
+            try:
+                frame = self.preview_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if frame is not None:
+            self._update_preview(frame)
+
+        self.root.after(15, self._drain_preview_queue)
+
     def _update_preview(self, frame):
         """Update preview with processed frame."""
         if not self.is_live:
@@ -302,10 +339,24 @@ Features:
     
     def _update_fps(self):
         """Update FPS display."""
-        while self.is_live:
-            fps = self.camera_processor.get_fps()
-            self.fps_label.configure(text=f"FPS: {fps:.1f}")
-            threading.Event().wait(0.5)
+        if not self.is_live:
+            self.fps_update_job = None
+            return
+
+        fps = self.camera_processor.get_fps()
+        self.fps_label.configure(text=f"FPS: {fps:.1f}")
+        self.fps_update_job = self.root.after(500, self._update_fps)
+
+    def _schedule_fps_update(self):
+        """Start the FPS refresh loop."""
+        if self.fps_update_job is None:
+            self._update_fps()
+
+    def _cancel_fps_update(self):
+        """Stop the FPS refresh loop."""
+        if self.fps_update_job is not None:
+            self.root.after_cancel(self.fps_update_job)
+            self.fps_update_job = None
     
     def run(self):
         """Run the application."""
@@ -317,6 +368,8 @@ Features:
     
     def _on_closing(self):
         """Handle window closing."""
+        self.is_closing = True
         if self.is_live:
             self.camera_processor.stop()
-        self.root.destroy() 
+            self._cancel_fps_update()
+        self.root.destroy()

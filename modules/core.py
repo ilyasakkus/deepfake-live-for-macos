@@ -39,9 +39,20 @@ class FaceSwapper:
     def _get_providers(self) -> List[str]:
         """Get ONNX Runtime providers based on execution provider."""
         if self.execution_provider == 'coreml':
-            return ['CoreMLExecutionProvider', 'CPUExecutionProvider']
-        else:
-            return ['CPUExecutionProvider']
+            try:
+                import onnxruntime as ort
+                available_providers = ort.get_available_providers()
+                if 'CoreMLExecutionProvider' in available_providers:
+                    return ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+
+                print("Warning: CoreMLExecutionProvider is not available.")
+                print(f"Available ONNX Runtime providers: {available_providers}")
+                print("Falling back to CPUExecutionProvider.")
+            except Exception as e:
+                print(f"Warning: Could not inspect ONNX Runtime providers: {e}")
+                print("Falling back to CPUExecutionProvider.")
+
+        return ['CPUExecutionProvider']
     
     def _init_swapper(self):
         """Initialize face swapper model."""
@@ -192,4 +203,4 @@ class FaceSwapper:
             Enhanced frame
         """
         # TODO: Implement face enhancement using GFPGAN or similar
-        return frame 
+        return frame

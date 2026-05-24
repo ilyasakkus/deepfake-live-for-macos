@@ -3,10 +3,6 @@ import os
 import sys
 import argparse
 import cv2
-import numpy as np
-from typing import Optional
-import threading
-import queue
 import time
 
 # Suppress warnings
@@ -93,19 +89,29 @@ def main():
             sys.exit(1)
         
         print("Running in CLI mode...")
-        camera_processor.set_source_image(args.source)
-        camera_processor.start()
+        if not camera_processor.set_source_image(args.source):
+            print("Error: failed to load a detectable source face")
+            sys.exit(1)
+
+        if not camera_processor.start():
+            print("Error: failed to start camera")
+            sys.exit(1)
         
         print("Press 'q' to quit...")
         try:
             while True:
-                time.sleep(0.1)
+                frame = camera_processor.get_frame()
+                if frame is not None:
+                    cv2.imshow("Deepfake Live Camera", frame)
+
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+                time.sleep(0.01)
         except KeyboardInterrupt:
             pass
-        
-        camera_processor.stop()
+        finally:
+            camera_processor.stop()
+            cv2.destroyAllWindows()
     else:
         # GUI mode
         print("Starting GUI...")
@@ -118,4 +124,4 @@ def main():
     print("Application closed.")
 
 if __name__ == "__main__":
-    main() 
+    main()
