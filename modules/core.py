@@ -2,6 +2,9 @@
 Core face swapping functionality using InsightFace and ONNX Runtime.
 """
 
+import contextlib
+import ctypes
+import ctypes.util
 import os
 import platform
 import subprocess
@@ -12,6 +15,45 @@ from typing import Optional, List, Tuple
 import insightface
 from insightface.app import FaceAnalysis
 from PIL import Image, ImageOps
+
+# --- macOS CoreML autorelease pool management ------------------------------
+# ONNX Runtime's CoreMLExecutionProvider returns Objective-C objects (the
+# prediction's MLMultiArray buffers) into the *current thread's* autorelease
+# pool. Inference runs on a background worker thread that has no Cocoa run loop
+# to drain that pool, so every frame's buffers accumulate (~44 MB/frame on the
+# inswapper model) until the process exhausts RAM and the OS kills it. Draining
+# a fresh autorelease pool around each frame releases them immediately. This is
+# a no-op on non-macOS platforms or if the Objective-C runtime can't be loaded.
+_objc = None
+if platform.system() == 'Darwin':
+    try:
+        _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+        _objc.objc_getClass.restype = ctypes.c_void_p
+        _objc.sel_registerName.restype = ctypes.c_void_p
+        _objc.objc_msgSend.restype = ctypes.c_void_p
+        _objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        _NSAutoreleasePool = _objc.objc_getClass(b'NSAutoreleasePool')
+        _SEL_alloc = _objc.sel_registerName(b'alloc')
+        _SEL_init = _objc.sel_registerName(b'init')
+        _SEL_drain = _objc.sel_registerName(b'drain')
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Warning: could not set up CoreML autorelease pool: {exc}")
+        _objc = None
+
+
+@contextlib.contextmanager
+def _autorelease_pool():
+    """Drain CoreML's autoreleased objects each frame (no-op off macOS)."""
+    if _objc is None:
+        yield
+        return
+    pool = _objc.objc_msgSend(
+        _objc.objc_msgSend(_NSAutoreleasePool, _SEL_alloc), _SEL_init
+    )
+    try:
+        yield
+    finally:
+        _objc.objc_msgSend(pool, _SEL_drain)
 
 class FaceSwapper:
     """Face swapping engine using InsightFace."""
@@ -300,25 +342,29 @@ class FaceSwapper:
             return frame
         
         try:
-            # Detect faces in target frame
-            target_faces = self.face_app.get(frame)
-            
-            if not target_faces:
-                return frame
-            
-            # Process each detected face
-            result = frame.copy()
-            for target_face in target_faces:
-                # Swap face
-                result = self.face_swapper.get(
-                    result,
-                    target_face,
-                    self.source_face,
-                    paste_back=True
-                )
-            
-            return result
-            
+            # Drain CoreML's per-inference Objective-C allocations each frame.
+            # Without this the CoreML provider leaks ~44 MB/frame (see
+            # _autorelease_pool above).
+            with _autorelease_pool():
+                # Detect faces in target frame
+                target_faces = self.face_app.get(frame)
+
+                if not target_faces:
+                    return frame
+
+                # Process each detected face
+                result = frame.copy()
+                for target_face in target_faces:
+                    # Swap face
+                    result = self.face_swapper.get(
+                        result,
+                        target_face,
+                        self.source_face,
+                        paste_back=True
+                    )
+
+                return result
+
         except Exception as e:
             print(f"Error processing frame: {e}")
             # Draw error on frame
